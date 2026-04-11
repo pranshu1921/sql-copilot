@@ -1,10 +1,8 @@
 """
 agent.py
 
-Self-correcting SQL agent: generates SQL, validates syntax, executes it,
-and on failure feeds the error back into the prompt and retries.
-
-Retry loop added in this commit. Plain English explanation added in commit 7.
+Self-correcting SQL agent with plain English result explanation.
+Final version of the agent layer.
 """
 from __future__ import annotations
 
@@ -43,6 +41,14 @@ Question: {question}
 {error_context}
 SQL query:"""
 
+EXPLAIN_PROMPT_TEMPLATE = """The user asked: "{question}"
+The following SQL query was run: {sql}
+The result has {n_rows} rows.
+First few rows: {sample}
+
+Write one or two plain English sentences explaining what the result means.
+Be direct and specific. Do not mention SQL."""
+
 
 @dataclass
 class AgentResult:
@@ -59,8 +65,7 @@ class AgentResult:
 
 class SQLAgent:
     """
-    Self-correcting SQL agent. Retries up to MAX_RETRIES times,
-    injecting the previous error back into the prompt each time.
+    Self-correcting SQL agent with plain English result explanation.
     """
 
     def __init__(self, con: duckdb.DuckDBPyConnection, hf_token: str) -> None:
@@ -69,10 +74,6 @@ class SQLAgent:
         self._schema_cache: str | None = None
 
     def run(self, question: str) -> AgentResult:
-        """
-        Run the agent with the self-correction retry loop.
-        On each failure the error is injected into the next prompt.
-        """
         result = AgentResult(question=question)
         schema = self._get_schema()
         previous_error: str | None = None
@@ -94,7 +95,7 @@ class SQLAgent:
             try:
                 df = self.con.execute(sql).fetchdf()
                 result.result = df
-                result.explanation = f"Query returned {len(df)} rows."
+                result.explanation = self._generate_explanation(question, sql, df)
                 result.success = True
                 logger.info("Query succeeded on attempt %d, %d rows", attempt, len(df))
                 return result
@@ -115,14 +116,12 @@ class SQLAgent:
         schema: str,
         previous_error: str | None,
     ) -> str:
-        """Call SQLCoder. Injects previous error into the prompt if retrying."""
         error_context = ""
         if previous_error:
             error_context = (
                 f"\nThe previous attempt failed with: {previous_error}\n"
                 f"Please fix the query.\n"
             )
-
         prompt = QUERY_PROMPT_TEMPLATE.format(
             schema=schema,
             question=question,
@@ -137,6 +136,32 @@ class SQLAgent:
             stop_sequences=["Question:", "\n\n\n"],
         )
         return self._extract_sql(response)
+
+    def _generate_explanation(
+        self,
+        question: str,
+        sql: str,
+        df: pd.DataFrame,
+    ) -> str:
+        """Ask the model to explain the result in plain English."""
+        sample = df.head(3).to_dict(orient="records")
+        prompt = EXPLAIN_PROMPT_TEMPLATE.format(
+            question=question,
+            sql=sql,
+            n_rows=len(df),
+            sample=sample,
+        )
+        try:
+            response = self.client.text_generation(
+                prompt,
+                model=SQLCODER_MODEL,
+                max_new_tokens=150,
+                temperature=0.3,
+            )
+            return response.strip()
+        except Exception as exc:
+            logger.warning("Explanation generation failed: %s", exc)
+            return f"Query returned {len(df)} rows."
 
     def _validate_sql(self, sql: str) -> str | None:
         try:
