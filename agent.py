@@ -1,12 +1,10 @@
 """
 agent.py
 
-Basic SQL agent: generates a SQL query from a natural language question
-using defog/sqlcoder-7b-2 via HF Inference API, validates syntax with
-SQLGlot, and executes it against DuckDB.
+Self-correcting SQL agent: generates SQL, validates syntax, executes it,
+and on failure feeds the error back into the prompt and retries.
 
-This version makes one attempt only. The self-correction retry loop
-is added in commit 6.
+Retry loop added in this commit. Plain English explanation added in commit 7.
 """
 from __future__ import annotations
 
@@ -23,6 +21,7 @@ from db import get_table_names, get_table_schema
 
 logger = logging.getLogger(__name__)
 
+MAX_RETRIES = 3
 SQLCODER_MODEL = "defog/sqlcoder-7b-2"
 
 SYSTEM_PROMPT = """You are SQLCoder, an expert SQL query generator.
@@ -41,7 +40,7 @@ QUERY_PROMPT_TEMPLATE = """Database schema:
 {schema}
 
 Question: {question}
-
+{error_context}
 SQL query:"""
 
 
@@ -60,8 +59,8 @@ class AgentResult:
 
 class SQLAgent:
     """
-    Generates SQL from a natural language question and executes it.
-    Single attempt only. Retry loop added in commit 6.
+    Self-correcting SQL agent. Retries up to MAX_RETRIES times,
+    injecting the previous error back into the prompt each time.
     """
 
     def __init__(self, con: duckdb.DuckDBPyConnection, hf_token: str) -> None:
@@ -70,37 +69,67 @@ class SQLAgent:
         self._schema_cache: str | None = None
 
     def run(self, question: str) -> AgentResult:
-        """Generate SQL, validate it, and execute it. One attempt only."""
+        """
+        Run the agent with the self-correction retry loop.
+        On each failure the error is injected into the next prompt.
+        """
         result = AgentResult(question=question)
-        result.attempts = 1
         schema = self._get_schema()
+        previous_error: str | None = None
 
-        sql = self._generate_sql(question, schema)
-        result.sql = sql
+        for attempt in range(1, MAX_RETRIES + 1):
+            result.attempts = attempt
+            logger.info("Attempt %d/%d", attempt, MAX_RETRIES)
 
-        validation_error = self._validate_sql(sql)
-        if validation_error:
-            result.error_message = f"Syntax error: {validation_error}"
-            logger.warning("SQLGlot validation failed: %s", validation_error)
-            return result
+            sql = self._generate_sql(question, schema, previous_error)
+            result.sql = sql
 
-        try:
-            df = self.con.execute(sql).fetchdf()
-            result.result = df
-            result.explanation = f"Query returned {len(df)} rows."
-            result.success = True
-            logger.info("Query succeeded, %d rows returned", len(df))
-        except Exception as exc:
-            result.error_message = str(exc)
-            logger.error("Execution failed: %s", exc)
+            validation_error = self._validate_sql(sql)
+            if validation_error:
+                previous_error = f"Syntax error: {validation_error}"
+                result.error_history.append(previous_error)
+                logger.warning("Validation failed on attempt %d: %s", attempt, previous_error)
+                continue
 
+            try:
+                df = self.con.execute(sql).fetchdf()
+                result.result = df
+                result.explanation = f"Query returned {len(df)} rows."
+                result.success = True
+                logger.info("Query succeeded on attempt %d, %d rows", attempt, len(df))
+                return result
+
+            except Exception as exc:
+                previous_error = str(exc)
+                result.error_history.append(previous_error)
+                logger.warning("Execution failed on attempt %d: %s", attempt, previous_error)
+
+        result.error_message = (
+            f"Failed after {MAX_RETRIES} attempts. Last error: {previous_error}"
+        )
         return result
 
-    def _generate_sql(self, question: str, schema: str) -> str:
-        """Call SQLCoder to generate SQL from the question and schema."""
-        prompt = f"{SYSTEM_PROMPT}\n\n{QUERY_PROMPT_TEMPLATE.format(schema=schema, question=question)}"
+    def _generate_sql(
+        self,
+        question: str,
+        schema: str,
+        previous_error: str | None,
+    ) -> str:
+        """Call SQLCoder. Injects previous error into the prompt if retrying."""
+        error_context = ""
+        if previous_error:
+            error_context = (
+                f"\nThe previous attempt failed with: {previous_error}\n"
+                f"Please fix the query.\n"
+            )
+
+        prompt = QUERY_PROMPT_TEMPLATE.format(
+            schema=schema,
+            question=question,
+            error_context=error_context,
+        )
         response = self.client.text_generation(
-            prompt,
+            f"{SYSTEM_PROMPT}\n\n{prompt}",
             model=SQLCODER_MODEL,
             max_new_tokens=512,
             temperature=0.01,
@@ -110,7 +139,6 @@ class SQLAgent:
         return self._extract_sql(response)
 
     def _validate_sql(self, sql: str) -> str | None:
-        """Use SQLGlot to check syntax. Returns error string or None if valid."""
         try:
             sqlglot.parse_one(sql, dialect="duckdb")
             return None
@@ -118,7 +146,6 @@ class SQLAgent:
             return str(exc)
 
     def _get_schema(self) -> str:
-        """Build and cache the CREATE TABLE schema string for all loaded tables."""
         if self._schema_cache:
             return self._schema_cache
         lines = []
@@ -134,7 +161,6 @@ class SQLAgent:
 
     @staticmethod
     def _extract_sql(raw_response: str) -> str:
-        """Extract the SQL statement from the model response."""
         cleaned = raw_response.strip()
         fenced = re.search(r"```(?:sql)?\s*(.*?)```", cleaned, re.DOTALL | re.IGNORECASE)
         if fenced:
