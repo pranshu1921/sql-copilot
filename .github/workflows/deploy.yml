@@ -16,18 +16,32 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Install Git LFS
-        run: git lfs install
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub
 
-      - name: Configure git
-        run: |
-          git config --global user.email "ci@github.com"
-          git config --global user.name "GitHub Actions"
-
-      - name: Push to HF Spaces
+      - name: Upload to HF Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git remote add hfspace https://pranshu2230:$HF_TOKEN@huggingface.co/spaces/pranshu2230/sql-copilot
-          git lfs push hfspace main
-          git push hfspace main --force
+          python - <<'EOF'
+          import os
+          from huggingface_hub import HfApi
+
+          api = HfApi(token=os.environ["HF_TOKEN"])
+
+          api.upload_folder(
+              folder_path=".",
+              repo_id="pranshu2230/sql-copilot",
+              repo_type="space",
+              ignore_patterns=[
+                  ".git*",
+                  ".github*",
+                  ".env",
+                  ".venv",
+                  "__pycache__",
+                  "*.pyc",
+                  "test_db.py",
+              ],
+          )
+          print("Upload complete.")
+          EOF
