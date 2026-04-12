@@ -16,10 +16,18 @@ jobs:
           fetch-depth: 0
           lfs: true
 
+      - name: Install Git LFS
+        run: git lfs install
+
+      - name: Configure git
+        run: |
+          git config --global user.email "ci@github.com"
+          git config --global user.name "GitHub Actions"
+
       - name: Push to HF Spaces
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          git config --global user.email "ci@github.com"
-          git config --global user.name "GitHub Actions"
-          git push https://pranshu2230:$HF_TOKEN@huggingface.co/spaces/pranshu2230/sql-copilot main --force
+          git remote add hfspace https://pranshu2230:$HF_TOKEN@huggingface.co/spaces/pranshu2230/sql-copilot
+          git lfs push hfspace main
+          git push hfspace main --force
