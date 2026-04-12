@@ -1,8 +1,9 @@
 """
 app.py
 
-Minimal Streamlit interface for the SQL co-pilot.
-Full sidebar, schema explorer, and example questions added here.
+Final Streamlit interface for the SQL co-pilot.
+Full chat history, sidebar, schema explorer, example questions,
+retry log, query counter, and clear conversation.
 """
 import os
 
@@ -10,7 +11,7 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from agent import SQLAgent
-from db import get_connection, get_table_names, get_table_schema, get_row_counts
+from db import get_connection, get_row_counts, get_table_names, get_table_schema
 
 load_dotenv()
 
@@ -35,12 +36,8 @@ EXAMPLE_QUESTIONS = [
 
 
 def get_hf_token() -> str:
-    # On HF Spaces, SPACE_ID is set automatically by the platform
-    # Only access st.secrets there — avoids the "no secrets file" warning locally
     if os.getenv("SPACE_ID"):
         return st.secrets.get("HF_TOKEN", "")
-
-    # Local development — read from .env
     token = os.getenv("HF_TOKEN", "")
     if not token:
         st.error(
@@ -60,6 +57,18 @@ def render_sidebar(con) -> None:
             "the loaded dataset, and explains the result. "
             "If the query fails, it automatically retries up to 3 times."
         )
+
+        st.divider()
+
+        query_count = len([
+            m for m in st.session_state.get("messages", [])
+            if m["role"] == "user"
+        ])
+        st.metric("Queries this session", query_count)
+
+        if st.button("Clear conversation", use_container_width=True):
+            st.session_state.messages = []
+            st.rerun()
 
         st.divider()
         st.markdown("### Example questions")
@@ -94,10 +103,6 @@ def render_sidebar(con) -> None:
 
 
 def render_home_context(con) -> None:
-    """
-    Shows dataset summary on the main page so users immediately
-    understand what data is loaded and what they can query.
-    """
     tables = get_table_names(con)
     counts = get_row_counts(con)
     total_rows = sum(counts.values())
@@ -134,7 +139,8 @@ def render_home_context(con) -> None:
 def render_result(result) -> None:
     if not result.success:
         st.error(
-            f"Could not generate a valid query after {result.attempts} attempt(s)."
+            f"Could not generate a valid query after "
+            f"{result.attempts} attempt(s)."
         )
         if result.error_history:
             with st.expander("Error details"):
@@ -142,7 +148,12 @@ def render_result(result) -> None:
                     st.text(f"Attempt {i}: {err}")
         return
 
-    st.success(f"Done in {result.attempts} attempt(s).")
+    attempt_label = (
+        f"Done in {result.attempts} attempt(s)."
+        if result.attempts == 1
+        else f"Done in {result.attempts} attempts (self-corrected)."
+    )
+    st.success(attempt_label)
 
     if result.explanation:
         st.info(result.explanation)
@@ -150,7 +161,19 @@ def render_result(result) -> None:
     with st.expander("Generated SQL", expanded=True):
         st.code(result.sql, language="sql")
 
-    st.dataframe(result.result, use_container_width=True, hide_index=True)
+    if result.error_history:
+        with st.expander(
+            f"Self-correction log — {len(result.error_history)} retry(s)"
+        ):
+            for i, err in enumerate(result.error_history, 1):
+                st.text(f"Attempt {i} error: {err}")
+
+    st.dataframe(
+        result.result,
+        use_container_width=True,
+        hide_index=True,
+    )
+    st.caption(f"{len(result.result):,} rows returned.")
 
 
 def main() -> None:
@@ -164,12 +187,14 @@ def main() -> None:
     con = get_connection()
 
     render_sidebar(con)
-    render_home_context(con)
 
     if "messages" not in st.session_state:
         st.session_state.messages = []
     if "pending_question" not in st.session_state:
         st.session_state.pending_question = None
+
+    if not st.session_state.messages:
+        render_home_context(con)
 
     agent = SQLAgent(con=con, hf_token=hf_token)
 
@@ -187,7 +212,9 @@ def main() -> None:
         st.session_state.pending_question = None
 
     if question:
-        st.session_state.messages.append({"role": "user", "content": question})
+        st.session_state.messages.append(
+            {"role": "user", "content": question}
+        )
         with st.chat_message("user"):
             st.markdown(question)
 
