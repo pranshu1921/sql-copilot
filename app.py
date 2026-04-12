@@ -36,20 +36,26 @@ EXAMPLE_QUESTIONS = [
 
 
 def get_hf_token() -> str:
+    # On HF Spaces the token is injected as an environment variable
+    # skip st.secrets entirely to avoid the missing secrets file warning
+    token = os.getenv("HF_TOKEN", "")
+    if token:
+        return token
+
+    # Local fallback — try st.secrets only if env var not found
     try:
         if "HF_TOKEN" in st.secrets:
             return st.secrets["HF_TOKEN"]
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError):
         pass
-    token = os.getenv("HF_TOKEN", "")
-    if not token:
-        st.error(
-            "HF_TOKEN not found. "
-            "Add it to your .env file for local development "
-            "or to Space secrets for deployment."
-        )
-        st.stop()
-    return token
+
+    st.error(
+        "HF_TOKEN not found. "
+        "Add it to your .env file for local development "
+        "or to Space secrets for deployment."
+    )
+    st.stop()
+    return ""
 
 
 def render_sidebar(con) -> None:
