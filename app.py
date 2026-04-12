@@ -36,13 +36,17 @@ EXAMPLE_QUESTIONS = [
 
 
 def get_hf_token() -> str:
-    if os.getenv("SPACE_ID"):
-        return st.secrets.get("HF_TOKEN", "")
+    try:
+        if "HF_TOKEN" in st.secrets:
+            return st.secrets["HF_TOKEN"]
+    except FileNotFoundError:
+        pass
     token = os.getenv("HF_TOKEN", "")
     if not token:
         st.error(
             "HF_TOKEN not found. "
-            "Add it to your .env file for local development."
+            "Add it to your .env file for local development "
+            "or to Space secrets for deployment."
         )
         st.stop()
     return token
