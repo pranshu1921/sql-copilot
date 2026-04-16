@@ -14,7 +14,7 @@ license: mit
 
 A production-oriented Text-to-SQL agent that converts natural language business questions into executable SQL queries, runs them against any structured CSV dataset, and self-corrects on errors without human intervention.
 
-**Live demo:** [huggingface.co/spaces/pranshu1921/sql-copilot](https://huggingface.co/spaces/pranshu1921/sql-copilot)
+**Live demo:** [huggingface.co/spaces/pranshu1921/sql-copilot](https://huggingface.co/spaces/pranshu2230/sql-copilot)
 
 ---
 
